@@ -4,7 +4,12 @@ import AffParser
 sys.path.insert(0, ".")          # parser.py im gleichen Ordner
 from AffParser import parseAffiliation
 from collections import Counter
+from GeoResolver import loadGeoNames, resolveCity
 import importlib
+import pycountry
+import re
+
+_CITY_MAP = loadGeoNames()
 
 importlib.reload(AffParser)
 
@@ -17,7 +22,7 @@ Reihenfolge:
   2. pycountry              (englische ISO-Standardnamen)
 """
 
-import pycountry
+
 
 
 # ── Dictionary ────────────────────────────────────────────────────────────────
@@ -291,14 +296,36 @@ def matchPycountry(text: str) -> str | None:
         return None
 
 
+def resolveFromWords(text: str, cityMap: dict[str, str]) -> str | None:
+    """
+    Fallback: scans every single word (back to front) in a text
+    and checks it against the dictionary cityMap. Useful for Affiliations like
+     "Universitätsklinik Leipzig".
+    """
+    #splitts on spaces AND dashes like (i.e. Hamburg-Eppendorf)
+    words = re.split(r"[\s\-]+", text.strip())
+    words = [w.strip(".,;") for w in words if w.strip(".,;")]
+
+    #check back to front (Geo-Names mostly in the last place)
+    for word in reversed(words):
+        result = matchAbbreviation(word) or resolveCity(word, cityMap)
+        if result:
+            return result
+    return None
 # ── Öffentliche API ───────────────────────────────────────────────────────────
+
 
 def resolve(text: str) -> str | None:
     """
-    Gibt den ISO-3166-1 alpha-2 Ländercode zurück oder None.
-    Dictionary hat Vorrang vor pycountry.
+    returns ISO-3166-1 alpha-2 Country-code (or None)
+    Order: Dictionary -> pycountry -> GeoNames (cities)
     """
-    return matchAbbreviation(text) or matchPycountry(text)
+    return (
+            matchAbbreviation(text)
+            or matchPycountry(text)
+            or resolveCity(text, _CITY_MAP)
+            or resolveFromWords(text, _CITY_MAP)
+            )
 
 
 # ── Tests (nur bei direktem Aufruf) ──────────────────────────────────────────
