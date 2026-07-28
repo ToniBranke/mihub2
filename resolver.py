@@ -1,6 +1,8 @@
 import polars as pl
 import sys
 import AffParser
+#from MIHUB2 import affiliations
+
 sys.path.insert(0, ".")          # parser.py im gleichen Ordner
 from AffParser import parseAffiliation
 from collections import Counter
@@ -315,17 +317,40 @@ def resolveFromWords(text: str, cityMap: dict[str, str]) -> str | None:
 # ── Öffentliche API ───────────────────────────────────────────────────────────
 
 
-def resolve(text: str) -> str | None:
+# ── Trust Scores ──────────────────────────────────────────────────────────────
+Trust_Scores = {
+    #exact matches
+    "dictionary_exact" :    1.0,
+    "pycountry_exact":      0.95,     #standard-ISO-Names
+    "geonames_exact":       0.90,     #whole String is known City(i.E.Leipzig)
+    "ror_exact":            0.85,     # Exact ROR-Name/ID Match
+
+    #partial matches
+    "dictionary_word":      0.85,   #found word in dict but String contains more text
+    "geonames_word":        0.80,   #City found in Text(i.E. "Univesitätsklinik Leipzig")
+    "ror_fuzzy":            0.70,   #ROR found in fuzzy search
+
+    #fallback
+    "not_found":            0.0,
+}
+
+def resolve(text: str) -> tuple[str | None, str | None, float]:
     """
-    returns ISO-3166-1 alpha-2 Country-code (or None)
+    returns ISO-3166-1 alpha-2 Country-code, Source for the decision and TrustScore (or None)
     Order: Dictionary -> pycountry -> GeoNames (cities)
     """
-    return (
-            matchAbbreviation(text)
-            or matchPycountry(text)
-            or resolveCity(text, _CITY_MAP)
-            or resolveFromWords(text, _CITY_MAP)
-            )
+    city = resolveCity(text, _CITY_MAP)
+    word = resolveFromWords(text, _CITY_MAP)
+    if matchAbbreviation(text):
+        return matchAbbreviation(text), "dictionary_exact", Trust_Scores["dictionary_exact"]
+    if matchPycountry(text):
+        return matchPycountry(text), "pycountry_exact", Trust_Scores["pycountry_exact"]
+    if city:
+        return city, "geonames_exact", Trust_Scores["geonames_exact"]
+    if word:
+        return word, "geonames_word", Trust_Scores["geonames_word"]
+    return None, "Not found", Trust_Scores["not_found"]
+
 
 
 # ── Tests (nur bei direktem Aufruf) ──────────────────────────────────────────
@@ -338,28 +363,57 @@ def resolve(text: str) -> str | None:
 #    for t in tests:
 #        print(f"{t:15} → {resolve(t)}")
 
-
-
+# ── Main Pipeline ────────────────────────────────────────────────────────────
 
 df = pl.read_csv("pubmed_rohdaten_komplett.csv")
 
+rows = []
+for row in df.select(["pmid", "affiliations"]).iter_rows():
+    pmid, affiliations = row
+    if not affiliations:
+        continue
+    for kandidat in parseAffiliation(affiliations):
+        country, source, trust = resolve(kandidat)
+        rows.append({
+            "pmid":                     pmid,
+            "affiliation_candidate":    kandidat,
+            "country":                  country if country else"not found",
+            "source":                   source,
+            "trust_score":              trust,
+        })
+result_df = pl.DataFrame(rows)
+result_df.write_csv("geo_classification.csv")
+
+# ── Statistics ───────────────────────────────────────────────────────────────
+
+total = len(rows)
+found = result_df.filter(pl.col("country") != "not found").shape[0]
+not_found = total - found
+
+print(f"\nTotal Candidates: {total: >6,}")
+print(f"Found:           {found: >6,}  ({found/total*100:.1f}%)")
+print(f"not found:       {not_found: >6,}  ({not_found/total*100:.1f}%)")
+
+print("\n candidates by source:")
+print(result_df.group_by("source").len().sort("len", descending=True))
+
 # Alle Geo-Kandidaten aus dem Parser sammeln
-kandidaten = []
-for aff in df["affiliations"].drop_nulls():
-    kandidaten.extend(parseAffiliation(aff))
+#kandidaten = []
+#for aff in df["affiliations"].drop_nulls():
+#    kandidaten.extend(parseAffiliation(aff))
 
 # Resolver drüberlaufen lassen
-treffer   = [resolve(k) for k in kandidaten]
-gefunden  = sum(1 for t in treffer if t is not None)
-nicht     = sum(1 for t in treffer if t is None)
+#treffer   = [resolve(k) for k in kandidaten]
+#gefunden  = sum(1 for t in treffer if t is not None)
+#nicht     = sum(1 for t in treffer if t is None)
 
-print(f"\nGesamt Kandidaten : {len(kandidaten):>6,}")
-print(f"Gefunden          : {gefunden:>6,}  ({gefunden/len(kandidaten)*100:.1f}%)")
-print(f"Nicht gefunden    : {nicht:>6,}  ({nicht/len(kandidaten)*100:.1f}%)")
+#print(f"\nGesamt Kandidaten : {len(kandidaten):>6,}")
+#print(f"Gefunden          : {gefunden:>6,}  ({gefunden/len(kandidaten)*100:.1f}%)")
+#print(f"Nicht gefunden    : {nicht:>6,}  ({nicht/len(kandidaten)*100:.1f}%)")
 
 # Was wird nicht gefunden?
-print("\nTop 15 nicht aufgelöste Kandidaten:")
+#print("\nTop 15 nicht aufgelöste Kandidaten:")
 
-nicht_gefunden = [k for k, t in zip(kandidaten, treffer) if t is None]
-for kanditat, anzahl in Counter(nicht_gefunden).most_common(15):
-    print(f"  {anzahl:>4}x  '{kanditat}'")
+#nicht_gefunden = [k for k, t in zip(kandidaten, treffer) if t is None]
+#for kanditat, anzahl in Counter(nicht_gefunden).most_common(15):
+#    print(f"  {anzahl:>4}x  '{kanditat}'")
