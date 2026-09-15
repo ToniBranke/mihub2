@@ -1,12 +1,14 @@
-import polars as pl
 import sys
 import AffParser
+import sqlite3
+from Creating_SQLite_Tables import DB_PATH
 #from MIHUB2 import affiliations
 
 sys.path.insert(0, ".")          # parser.py im gleichen Ordner
-from AffParser import parseAffiliation
+from AffParser import parseAffiliation, splitAffiliations, removeNoise, extractGeoField
 from collections import Counter
 from GeoResolver import loadGeoNames, resolveCity
+from RorResolver import queryRor
 import importlib
 import pycountry
 import re
@@ -23,9 +25,6 @@ Reihenfolge:
   1. Abkürzungs-Dictionary  (Sonderfälle & nicht-englische Namen)
   2. pycountry              (englische ISO-Standardnamen)
 """
-
-
-
 
 # ── Dictionary ────────────────────────────────────────────────────────────────
 
@@ -139,6 +138,10 @@ ABBREVIATIONS = {
     "P.R. China":                   "CN",
     "PR China":                     "CN",
     "PRC":                          "CN",
+    "P. R. China":                  "CN",
+    "P. R. China.":                 "CN",
+    "P.R.China":                    "CN",
+    "People's Republic of China":   "CN",
     "Mainland China":               "CN",
     "China (Mainland)":             "CN",
     "Hong Kong":                    "HK",
@@ -314,11 +317,9 @@ def resolveFromWords(text: str, cityMap: dict[str, str]) -> str | None:
         if result:
             return result
     return None
-# ── Öffentliche API ───────────────────────────────────────────────────────────
 
-
-# ── Trust Scores ──────────────────────────────────────────────────────────────
-Trust_Scores = {
+# ── Trust Ranking ──────────────────────────────────────────────────────────────
+Trust_RANKING = {
     #exact matches
     "dictionary_exact" :    1.0,
     "pycountry_exact":      0.95,     #standard-ISO-Names
@@ -336,24 +337,24 @@ Trust_Scores = {
 
 def resolve(text: str) -> tuple[str | None, str | None, float]:
     """
-    returns ISO-3166-1 alpha-2 Country-code, Source for the decision and TrustScore (or None)
+    returns ISO-3166-1 alpha-2 Country-code, Source for the decision and TrustRanking (or None)
     Order: Dictionary -> pycountry -> GeoNames (cities)
     """
-    city = resolveCity(text, _CITY_MAP)
-    word = resolveFromWords(text, _CITY_MAP)
     if matchAbbreviation(text):
-        return matchAbbreviation(text), "dictionary_exact", Trust_Scores["dictionary_exact"]
+        return matchAbbreviation(text), "dictionary_exact", Trust_RANKING["dictionary_exact"]
     if matchPycountry(text):
-        return matchPycountry(text), "pycountry_exact", Trust_Scores["pycountry_exact"]
+        return matchPycountry(text), "pycountry_exact", Trust_RANKING["pycountry_exact"]
+    city = resolveCity(text, _CITY_MAP)
     if city:
-        return city, "geonames_exact", Trust_Scores["geonames_exact"]
+        return city, "geonames_exact", Trust_RANKING["geonames_exact"]
+    word = resolveFromWords(text, _CITY_MAP)
     if word:
-        return word, "geonames_word", Trust_Scores["geonames_word"]
-    return None, "Not found", Trust_Scores["not_found"]
+        return word, "geonames_word", Trust_RANKING["geonames_word"]
+    return None, "Not found", Trust_RANKING["not_found"]
 
 
 
-# ── Tests (nur bei direktem Aufruf) ──────────────────────────────────────────
+# ── Tests (only with direct call) ──────────────────────────────────────────
 
 # if __name__ == "__main__":
 #    tests = [
@@ -362,58 +363,108 @@ def resolve(text: str) -> tuple[str | None, str | None, float]:
 #    ]
 #    for t in tests:
 #        print(f"{t:15} → {resolve(t)}")
-
+con = sqlite3.connect(DB_PATH)
+cur = con.cursor()
+cur.execute("DELETE FROM geo_zuordnung")
+cur.execute("DELETE FROM laender_quarantaene")
+con.commit()
+con.close()
+print("geo_zuordnung und laender_quarantaene Tabellen geleert")
 # ── Main Pipeline ────────────────────────────────────────────────────────────
+con = sqlite3.connect(DB_PATH)
+cur = con.cursor()
 
-df = pl.read_csv("pubmed_rohdaten_komplett.csv")
+#aus "artikel" lesen
+cur.execute("SELECT pmid, affiliations FROM artikel WHERE affiliations IS NOT NULL;")
+artikel_rows = cur.fetchall()
+print(f"Verarbeite {len(artikel_rows):,} Artikel")
 
-rows = []
-for row in df.select(["pmid", "affiliations"]).iter_rows():
-    pmid, affiliations = row
-    if not affiliations:
-        continue
-    for kandidat in parseAffiliation(affiliations):
-        country, source, trust = resolve(kandidat)
-        rows.append({
-            "pmid":                     pmid,
-            "affiliation_candidate":    kandidat,
-            "country":                  country if country else"not found",
-            "source":                   source,
-            "trust_score":              trust,
-        })
-result_df = pl.DataFrame(rows)
-result_df.write_csv("geo_classification.csv")
 
-# ── Statistics ───────────────────────────────────────────────────────────────
 
-total = len(rows)
-found = result_df.filter(pl.col("country") != "not found").shape[0]
-not_found = total - found
+# Step 1 - collects every candidate and counts them (before getting deduplicated)
+kandidat_counter = Counter()
+kandidat_pmids = {}
 
-print(f"\nTotal Candidates: {total: >6,}")
-print(f"Found:           {found: >6,}  ({found/total*100:.1f}%)")
-print(f"not found:       {not_found: >6,}  ({not_found/total*100:.1f}%)")
+for pmid, affiliations in artikel_rows:
+    for single in splitAffiliations(affiliations):
+        clean = removeNoise(single)
+        if not clean:
+            continue
+        field = extractGeoField(clean)
+        field = re.sub(r'^\d{4,6}}\s+', '', field).strip()
+        if field and len(field) >= 3:
+            kandidat_counter[field] += 1
+            if field not in kandidat_pmids:
+                kandidat_pmids[field] = (pmid, single)
 
-print("\n candidates by source:")
-print(result_df.group_by("source").len().sort("len", descending=True))
+print(f"{sum(kandidat_counter.values()):,} Kandidaten gesamt, wovon {len(kandidat_counter):,} einzigartig sind.")
 
-# Alle Geo-Kandidaten aus dem Parser sammeln
-#kandidaten = []
-#for aff in df["affiliations"].drop_nulls():
-#    kandidaten.extend(parseAffiliation(aff))
+# Step 2 - resolve and save only unique candidates
+batch_geo = []          #trust >= 0.80
+batch_manual = []      #trust < 0.80 / no Geo-candidate
 
-# Resolver drüberlaufen lassen
-#treffer   = [resolve(k) for k in kandidaten]
-#gefunden  = sum(1 for t in treffer if t is not None)
-#nicht     = sum(1 for t in treffer if t is None)
+for i, (kandidat, count) in enumerate(kandidat_counter.items()):
+    country, source, trust_ranking = resolve(kandidat)
+    pmid, affiliation_roh, = kandidat_pmids[kandidat]
 
-#print(f"\nGesamt Kandidaten : {len(kandidaten):>6,}")
-#print(f"Gefunden          : {gefunden:>6,}  ({gefunden/len(kandidaten)*100:.1f}%)")
-#print(f"Nicht gefunden    : {nicht:>6,}  ({nicht/len(kandidaten)*100:.1f}%)")
+    # setting the reason
+    if country is None:
+        reason = "not_found"
+    elif trust_ranking < 0.90:
+        reason = "low_trust"
+    else:
+        reason = None
 
-# Was wird nicht gefunden?
-#print("\nTop 15 nicht aufgelöste Kandidaten:")
+    entry = (
+        pmid,
+        kandidat,
+        affiliation_roh,
+        country if country else "not found",
+        source,
+        trust_ranking,
+        count
+    )
 
-#nicht_gefunden = [k for k, t in zip(kandidaten, treffer) if t is None]
-#for kanditat, anzahl in Counter(nicht_gefunden).most_common(15):
-#    print(f"  {anzahl:>4}x  '{kanditat}'")
+    if reason:
+        batch_manual.append(entry + (reason,))
+    else:
+        batch_geo.append(entry)
+
+#alle 10.000 Zeilen in DB schreiben
+    if len(batch_geo) >= 10000:
+        cur.executemany("""
+                        INSERT INTO geo_zuordnung
+                        (pmid, affiliation_kandidat, affiliation_raw, land, quelle, trust_ranking, count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, batch_geo)
+        con.commit()
+        print(f"{i:,}/{len(kandidat_counter):,} Artikel verarbeitet", flush=True)
+        batch_geo = []
+
+        if len(batch_manual) >= 10000:
+            cur.executemany("""
+                            INSERT INTO laender_quarantaene
+                            (pmid, affiliation_candidate, affiliation_raw, country, source, trust_ranking, count, reason)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, batch_manual)
+            con.commit()
+            batch_manual = []
+
+#den Rest rausschreiben
+if batch_geo:
+    cur.executemany("""
+        INSERT INTO geo_zuordnung 
+        (pmid, affiliation_kandidat, affiliation_raw, land, quelle, trust_ranking, count) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, batch_geo)
+    con.commit()
+if batch_manual:
+    cur.executemany("""
+       INSERT INTO laender_quarantaene
+        (pmid, affiliation_candidate, affiliation_raw, country, source, trust_ranking, count, reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, batch_manual)
+    con.commit()
+con.close()
+
+print("alle ergebnisse in DB erfolgreich geschrieben")

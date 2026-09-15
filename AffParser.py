@@ -99,6 +99,14 @@ def removeNoise(text: str) -> str:
         text = re.sub(r"[Gg]eb\.\s*[\d.]+", "", text)
         # zip-code + city blocks "76131 Karlsruhe"
         text = re.sub(r"\b\d{4,5}\s+[A-ZÄÖÜ][a-zäöüß]+", "", text)
+        # zip-code infront of Country name "550000 China" -> "China"
+        text = re.sub(r"\b\d{4,6}\s+(?=[A-Z])", "", text)
+        #author initials in the end: "(Y.N.)" or "(S.K.)"
+        text = re.sub(r"\s*\([A-Z]\.[A-Z A-Z\.]*\)\s*$", "", text)
+        text = re.sub(r"\s*[A-Z]\.[A-Z\.]+\)\s*§", "", text)
+        #trailing special characters after country name: "Italy -" -> "Italy"
+        text = re.sub(r"\s*[-\(\)]+s*$", "", text)
+
 
     return text.strip().strip(",").strip()
 
@@ -132,6 +140,9 @@ def extractGeoField(affiliation: str) -> str:
     parts = [p.strip() for p in affiliation.split(",")]
     parts = [p for p in parts if len(p) > 1]
 
+    if not parts:
+        return ""
+
     # from last: first field that fits no Non-Geo-Pattern
     for part in reversed(parts):
         if not _NON_GEO.match(part):
@@ -139,10 +150,35 @@ def extractGeoField(affiliation: str) -> str:
         # Fallback: last field
     return parts[-1]
 
-# ===================================
-#   Open API - combine all 3 steps
-# ===================================
 
+def is_valid_geo_candidate(text : str) -> bool:
+
+    NON_GEO_STRINGS = {
+        "corresponding author","ippnw", "equal contribution", "these authors contributed equally"
+    }
+
+    #filters "trash"-Strings before they get written into the db
+    if not text or len(text) < 3:
+        return False
+    #only punctiuation marks
+    if re.match(r'^[\s\.\,\;\:\!\?\(\)\[\]]+$', text):
+        return False
+    #ORCID-Identifier
+    if re.match(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dx]$', text):
+        return False
+    #only Numbers
+    if re.match(r'^\d+$', text):
+        return False
+    if text.lower() in NON_GEO_STRINGS:
+        return False
+    #only initals ("S.K." or "Y.N.")
+    if re.match(r"^[A-Z]\.[A-Z\.]+\)?$", text):
+        return False
+    return True
+
+
+
+#   Open API - combine all 3 steps
 def parseAffiliation(raw: str) -> list[str]:
     """
     takes a raw PubMed-Affiliation string.
@@ -163,6 +199,11 @@ def parseAffiliation(raw: str) -> list[str]:
         if not clean:
             continue
         field = extractGeoField(clean)          # step 3
-        if field:
+        #remove zip code infront
+        field = re.sub(r'^\d{4,6}\s+', '', field).strip()
+        if field and is_valid_geo_candidate(field):
             candidates.append(field)
+
+        #if field:
+        #    candidates.append(field)
     return candidates
