@@ -363,83 +363,86 @@ def resolve(text: str) -> tuple[str | None, str | None, float]:
 #    ]
 #    for t in tests:
 #        print(f"{t:15} → {resolve(t)}")
-con = sqlite3.connect(DB_PATH)
-cur = con.cursor()
-cur.execute("DELETE FROM geo_zuordnung")
-cur.execute("DELETE FROM laender_quarantaene")
-con.commit()
-con.close()
-print("geo_zuordnung und laender_quarantaene Tabellen geleert")
-# ── Main Pipeline ────────────────────────────────────────────────────────────
-con = sqlite3.connect(DB_PATH)
-cur = con.cursor()
+def run_geo_pipeline():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
 
-#aus "artikel" lesen
-cur.execute("SELECT pmid, affiliations FROM artikel WHERE affiliations IS NOT NULL;")
-artikel_rows = cur.fetchall()
-print(f"Verarbeite {len(artikel_rows):,} Artikel")
+    #cur.execute("DELETE FROM geo_zuordnung")
+    #cur.execute("DELETE FROM laender_quarantaene")
+    #con.commit()
+    #con.close()
+    #print("geo_zuordnung und laender_quarantaene Tabellen geleert")
+
+    # ── Main Pipeline ────────────────────────────────────────────────────────────
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+
+    #aus "artikel" lesen
+    cur.execute("SELECT pmid, affiliations FROM artikel WHERE affiliations IS NOT NULL;")
+    artikel_rows = cur.fetchall()
+    print(f"Verarbeite {len(artikel_rows):,} Artikel")
 
 
 
-# Step 1 - collects every candidate and counts them (before getting deduplicated)
-kandidat_counter = Counter()
-kandidat_pmids = {}
+    # Step 1 - collects every candidate and counts them (before getting deduplicated)
+    kandidat_counter = Counter()
+    kandidat_pmids = {}
 
-for pmid, affiliations in artikel_rows:
-    for single in splitAffiliations(affiliations):
-        clean = removeNoise(single)
-        if not clean:
-            continue
-        field = extractGeoField(clean)
-        field = re.sub(r'^\d{4,6}}\s+', '', field).strip()
-        if field and len(field) >= 3:
-            kandidat_counter[field] += 1
-            if field not in kandidat_pmids:
-                kandidat_pmids[field] = (pmid, single)
+    for pmid, affiliations in artikel_rows:
+        for single in splitAffiliations(affiliations):
+            clean = removeNoise(single)
+            if not clean:
+                continue
+            field = extractGeoField(clean)
+            field = re.sub(r'^\d{4,6}}\s+', '', field).strip()
+            if field and len(field) >= 3:
+                kandidat_counter[field] += 1
+                if field not in kandidat_pmids:
+                    kandidat_pmids[field] = (pmid, single)
 
-print(f"{sum(kandidat_counter.values()):,} Kandidaten gesamt, wovon {len(kandidat_counter):,} einzigartig sind.")
+    print(f"{sum(kandidat_counter.values()):,} Kandidaten gesamt, wovon {len(kandidat_counter):,} einzigartig sind.")
 
-# Step 2 - resolve and save only unique candidates
-batch_geo = []          #trust >= 0.80
-batch_manual = []      #trust < 0.80 / no Geo-candidate
+    # Step 2 - resolve and save only unique candidates
+    batch_geo = []          #trust >= 0.80
+    batch_manual = []      #trust < 0.80 / no Geo-candidate
 
-for i, (kandidat, count) in enumerate(kandidat_counter.items()):
-    country, source, trust_ranking = resolve(kandidat)
-    pmid, affiliation_roh, = kandidat_pmids[kandidat]
+    for i, (kandidat, count) in enumerate(kandidat_counter.items()):
+        country, source, trust_ranking = resolve(kandidat)
+        pmid, affiliation_roh, = kandidat_pmids[kandidat]
 
-    # setting the reason
-    if country is None:
-        reason = "not_found"
-    elif trust_ranking < 0.90:
-        reason = "low_trust"
-    else:
-        reason = None
+        # setting the reason
+        if country is None:
+            reason = "not_found"
+        elif trust_ranking < 0.90:
+            reason = "low_trust"
+        else:
+            reason = None
 
-    entry = (
-        pmid,
-        kandidat,
-        affiliation_roh,
-        country if country else "not found",
-        source,
-        trust_ranking,
-        count
-    )
+        entry = (
+            pmid,
+            kandidat,
+            affiliation_roh,
+            country if country else "not found",
+            source,
+            trust_ranking,
+            count
+        )
 
-    if reason:
-        batch_manual.append(entry + (reason,))
-    else:
-        batch_geo.append(entry)
+        if reason:
+            batch_manual.append(entry + (reason,))
+        else:
+            batch_geo.append(entry)
 
-#alle 10.000 Zeilen in DB schreiben
-    if len(batch_geo) >= 10000:
-        cur.executemany("""
-                        INSERT INTO geo_zuordnung
-                        (pmid, affiliation_kandidat, affiliation_raw, land, quelle, trust_ranking, count)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, batch_geo)
-        con.commit()
-        print(f"{i:,}/{len(kandidat_counter):,} Artikel verarbeitet", flush=True)
-        batch_geo = []
+    #alle 10.000 Zeilen in DB schreiben
+        if len(batch_geo) >= 10000:
+            cur.executemany("""
+                            INSERT INTO geo_zuordnung
+                            (pmid, affiliation_kandidat, affiliation_raw, land, quelle, trust_ranking, count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, batch_geo)
+            con.commit()
+            print(f"{i:,}/{len(kandidat_counter):,} Artikel verarbeitet", flush=True)
+            batch_geo = []
 
         if len(batch_manual) >= 10000:
             cur.executemany("""
@@ -450,21 +453,23 @@ for i, (kandidat, count) in enumerate(kandidat_counter.items()):
             con.commit()
             batch_manual = []
 
-#den Rest rausschreiben
-if batch_geo:
-    cur.executemany("""
-        INSERT INTO geo_zuordnung 
-        (pmid, affiliation_kandidat, affiliation_raw, land, quelle, trust_ranking, count) 
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, batch_geo)
-    con.commit()
-if batch_manual:
-    cur.executemany("""
-       INSERT INTO laender_quarantaene
-        (pmid, affiliation_candidate, affiliation_raw, country, source, trust_ranking, count, reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, batch_manual)
-    con.commit()
-con.close()
+    #den Rest rausschreiben
+    if batch_geo:
+        cur.executemany("""
+            INSERT INTO geo_zuordnung 
+            (pmid, affiliation_kandidat, affiliation_raw, land, quelle, trust_ranking, count) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, batch_geo)
+        con.commit()
+    if batch_manual:
+        cur.executemany("""
+           INSERT INTO laender_quarantaene
+            (pmid, affiliation_candidate, affiliation_raw, country, source, trust_ranking, count, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, batch_manual)
+        con.commit()
+    con.close()
 
-print("alle ergebnisse in DB erfolgreich geschrieben")
+    print("alle ergebnisse in DB erfolgreich geschrieben")
+if __name__ == "__main__":
+    run_geo_pipeline()

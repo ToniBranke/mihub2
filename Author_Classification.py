@@ -298,5 +298,23 @@ def classify_stufe_2(db_path = DB_PATH):
     print(f"{len(updates):,} Zeilen per Muster klassifiziert(trust_ranking 1-2, pruefung_notwendig = True)")
     print(df_check)
 
+def unistr(s): return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1),16)), s)
+con = sqlite3.connect('stat.db'); con.create_function('unistr', 1, unistr)
+for f in ['geo_zuordnung_export_02.sql','laender_quarantaene_export.sql']:
+    con.executescript(open(f, encoding='utf-8').read())
+con.commit()
+
+
+SELECT quelle, trust_ranking, COUNT(*) AS kandidaten, SUM(count) AS vorkommen
+FROM geo_zuordnung GROUP BY 1,2 ORDER BY 2 DESC;
+
+-- Fehlerverdacht: häufigste Kandidaten der unsicheren Stufen
+SELECT affiliation_kandidat, land, count FROM geo_zuordnung
+WHERE trust_ranking <= 0.9 ORDER BY count DESC LIMIT 50;
+
+-- Konsistenz
+SELECT affiliation_kandidat FROM geo_zuordnung
+GROUP BY 1 HAVING COUNT(DISTINCT land) > 1;
+
 if __name__ == "__main__":
     classify_stufe_2()
