@@ -1,6 +1,8 @@
 import time
 import requests
 import sqlite3
+import unicodedata
+
 from Creating_SQLite_Tables import DB_PATH
 
 """
@@ -17,33 +19,57 @@ from Creating_SQLite_Tables import DB_PATH
 
 ROR_API_URL = "https://api.ror.org/v2/organizations"
 
+def _normalize_ror_name(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value)
+    return " ".join(value.casefold().split())
+
 def queryRor (name: str) -> str | None:
     """
         looks for a named institution in the ROR API
         returns the ISO-3166-1 alpha 2 country code of the best fit (or None)
     """
+    target = _normalize_ror_name(name)
+    if not target:
+        return None
+
     try:
         response = requests.get(
             ROR_API_URL,
-            params={"query": name},
+            params={"affiliation": name},
             timeout=10,
         )
         response.raise_for_status()
-        data = response.json()
-        items = data.get("items", [])
-        if not items:
+
+        items = response.json().get("items", [])
+        exact = []
+        for item in items:
+            organization = item.get("organization") or {}
+            names = organization.get("names") or []
+
+            if any(
+                isinstance(entry.get("value"), str)
+                and "acronym" not in (entry.get("types") or [])
+                and _normalize_ror_name(entry["value"]) == target
+                for entry in names
+            ):
+                exact.append(item)
+
+        if len(exact) != 1 or exact[0].get("chosen") is not True:
             return None
 
-        #best match (first result, ROR sorts for relevance)
-        best_match = items[0]
-        countryCode = (
-            best_match
-            .get("locations", [{}])[0]#
-            .get("geonames_details", {})
-            .get("country_code")
-        )
-        return countryCode
-    except (requests.RequestException, IndexError, KeyError):
+        organization = exact[0]["organization"]
+        if organization.get("status") != "active":
+            return None
+
+        country_codes = {
+            (location.get("geonames_details") or {}).get("country_code")
+            for location in (organization.get("locations") or [])
+        }
+        country_codes.discard(None)
+
+        return next(iter(country_codes)) if len(country_codes) == 1 else None
+
+    except (requests.RequestException, ValueError, TypeError, AttributeError, KeyError):
         return None
 
 def resolve_not_found():
@@ -62,7 +88,7 @@ def resolve_not_found():
         if country:
             cur.execute("""
                 UPDATE laender_quarantaene 
-                SET country = ?, source = 'ror_exact', trust_ranking = 0.85, reason = 'ror_solved'
+                SET country = ?, source = 'ror_exact', trust_ranking = 0.85, reason = 'ror_verified'
                 WHERE affiliation_candidate = ? AND reason = 'not_found'
             """, (country, name))
             con.commit()
