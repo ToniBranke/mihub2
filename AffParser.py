@@ -16,42 +16,19 @@ import re
 # ============================================
 
 # initially as numbered blocks -> splits them up into multiple strings
-
-_NUMBERED_SPLIT = re.compile(r"(?<=[.!?])\s+(?=\d+\s+[A-Z])")
+_AFFILIATION_SEPARATORS = re.compile(
+    r"\s*\|\s*"
+    r"|(?<=\.)\s+&\s+(?=[A-ZÄÖÜ])"
+    r"|;\s+(?=[A-ZÄÖÜ])"
+)
 
 def splitAffiliations(raw: str) -> list[str]:
-    """
-    returns a list of single Affiliations
-
-    supported formats:
-    split with "|"
-        "inst A, Berlin, Germany | inst B, Paris, France"
-
-    split with ";"
-        "inst A, Berlin, Germany; inst B, Paris, France"
-
-    Single Affiliations (no splitting sign)
-        "Charité Berlin, Berlin, Germany"
-    """
-
-    #split with "|"
-    if "|" in raw:
-        return [s.strip() for s in raw.split("|") if s.strip()]
-
-    #Numbered
-    parts = _NUMBERED_SPLIT .split(raw)
-    if len(parts) > 1:
-        cleaned = []
-        for part in parts:
-            # delete leading number and space ("1 Inst A" -> "Inst A")
-            part = re.sub(r"^\d+\s", "", part).strip()
-            if part:
-                cleaned.append(part)
-        return cleaned
-
-    # Single Affiliation
-    return [raw.strip()]
-
+    """Trennt eigenständige Affiliations an |, '. &' und Semikolon."""
+    return [
+        part.strip()
+        for part in _AFFILIATION_SEPARATORS.split(raw)
+        if part.strip()
+    ]
 # ============================
 #     step 2 delete Noise
 # ============================
@@ -76,6 +53,7 @@ _NOISE_PATTERNS: list [re.Pattern] = [
     # Trailing-punctuation
     re.compile(r"[.,;]\s*$"),
 ]
+
 def removeNoise(text: str) -> str:
     """
         removes e-mail adresses, mailboxes & other non-geo-information
@@ -149,61 +127,3 @@ def extractGeoField(affiliation: str) -> str:
             return part
         # Fallback: last field
     return parts[-1]
-
-
-def is_valid_geo_candidate(text : str) -> bool:
-
-    NON_GEO_STRINGS = {
-        "corresponding author","ippnw", "equal contribution", "these authors contributed equally"
-    }
-
-    #filters "trash"-Strings before they get written into the db
-    if not text or len(text) < 3:
-        return False
-    #only punctiuation marks
-    if re.match(r'^[\s\.\,\;\:\!\?\(\)\[\]]+$', text):
-        return False
-    #ORCID-Identifier
-    if re.match(r'^\d{4}-\d{4}-\d{4}-\d{3}[\dx]$', text):
-        return False
-    #only Numbers
-    if re.match(r'^\d+$', text):
-        return False
-    if text.lower() in NON_GEO_STRINGS:
-        return False
-    #only initals ("S.K." or "Y.N.")
-    if re.match(r"^[A-Z]\.[A-Z\.]+\)?$", text):
-        return False
-    return True
-
-
-
-#   Open API - combine all 3 steps
-def parseAffiliation(raw: str) -> list[str]:
-    """
-    takes a raw PubMed-Affiliation string.
-    returns list of cleaned Geo-Candidates
-    (one per affiliation)
-
-    Example:
-    -------------
-    >>> parseAffiliation("charité Berlin, Berlin, Germany, Email: x@charté.de")
-    ['Germany']
-    >>> parseAffiliation("Inst A, Berlin, Germany, Inst B, Paris, France")
-    ['Germany', 'France']
-    """
-    candidates: list[str] = []
-
-    for single in splitAffiliations(raw):       # step 1
-        clean = removeNoise(single)             # step 2
-        if not clean:
-            continue
-        field = extractGeoField(clean)          # step 3
-        #remove zip code infront
-        field = re.sub(r'^\d{4,6}\s+', '', field).strip()
-        if field and is_valid_geo_candidate(field):
-            candidates.append(field)
-
-        #if field:
-        #    candidates.append(field)
-    return candidates

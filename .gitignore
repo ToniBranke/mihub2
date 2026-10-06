@@ -2,3 +2,6 @@
 *.pyc
 __pycache__/
 .idea/
+pubmed_2025_komplett.csv
+mihub.sql
+mihub2.db*

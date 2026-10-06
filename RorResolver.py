@@ -69,8 +69,8 @@ def queryRor (name: str) -> str | None:
 
         return next(iter(country_codes)) if len(country_codes) == 1 else None
 
-    except (requests.RequestException, ValueError, TypeError, AttributeError, KeyError):
-        return None
+    except (requests.RequestException, ValueError, TypeError, AttributeError, KeyError) as exc:
+        raise RuntimeError(f"ROR-Abfrage  fehlgeschlagen für {name!r}") from exc
 
 def resolve_not_found():
     con = sqlite3.connect(DB_PATH)

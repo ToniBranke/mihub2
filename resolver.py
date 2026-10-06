@@ -9,7 +9,7 @@ from Creating_SQLite_Tables import DB_PATH
 #from MIHUB2 import affiliations
 
 sys.path.insert(0, ".")          # parser.py im gleichen Ordner
-from AffParser import parseAffiliation, splitAffiliations, removeNoise, extractGeoField
+from AffParser import splitAffiliations, removeNoise, extractGeoField
 from collections import Counter
 from GeoResolver import loadGeoNames, resolveCity
 from RorResolver import queryRor
@@ -433,6 +433,11 @@ ABBREVIATIONS = {
     "United States Minor Outlying Islands": "UM",
 }
 
+_WORD_CONTEXT_REQUIRED = {
+    "university", "universidad", "universidade", "université", "universitat", "universität",
+    "universita", "universitá", "normal", "federal", "union", "oral"
+}
+
 
 # ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 def _alias_key(text: str) -> str:
@@ -493,6 +498,71 @@ def matchPycountry(text: str) -> tuple[str | None, str | None]:
 
     return None, None
 
+_TEXT_COUNTRY_CANDIDATES = {}
+for name, country in _NORMALIZED_ABBREVIATIONS.items():
+    if len(name) >= 4:
+        _TEXT_COUNTRY_CANDIDATES.setdefault(name, set()).add(country)
+
+for name, countries in _COUNTRY_NAMES.items():
+    normalized = _alias_key(name)
+    if len(normalized) >= 4:
+        _TEXT_COUNTRY_CANDIDATES.setdefault(normalized, set()).update(countries)
+
+_TEXT_SUBDIVISIONS = {}
+for name, countries in _SUBDIVISION_NAMES.items():
+    _TEXT_SUBDIVISIONS.setdefault(_alias_key(name), set()).update(countries)
+
+_TEXT_COUNTRY_NAMES = {
+    name: next(iter(countries))
+    for name, countries in _TEXT_COUNTRY_CANDIDATES.items()
+    if len(countries) == 1
+    and not (_TEXT_SUBDIVISIONS.get(name, set()) - countries)
+}
+
+_TEXT_BLOCKED_SUFFIXES = {
+    name: tuple(
+        subdivision
+        for subdivision, countries in _TEXT_SUBDIVISIONS.items()
+        if subdivision.endswith(" " + name) and country not in countries
+    )
+    for name, country in _TEXT_COUNTRY_NAMES.items()
+}
+
+_TEXT_COUNTRY_RE = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(
+        re.escape(name)
+        for name in sorted(_TEXT_COUNTRY_NAMES, key=len, reverse=True)
+    )
+    + r")(?!\w)"
+)
+
+
+def match_country_in_text(text: str) -> tuple[str | None, str | None]:
+    tail = _alias_key(text).rstrip(" \t.,;:)]")
+    before, separator, last_word = tail.rpartition(" ")
+
+    if separator and re.fullmatch(r"\d{4,6}", last_word):
+        tail = before.rstrip(" \t.,;:)]")
+
+    matches = []
+    for match in _TEXT_COUNTRY_RE.finditer(tail):
+        name = match.group(0)
+        if any(
+            tail[:match.end()].endswith(subdivision)
+            for subdivision in _TEXT_BLOCKED_SUFFIXES[name]
+        ):
+            continue
+        matches.append((match.end(), _TEXT_COUNTRY_NAMES[name]))
+
+    if not matches or matches[-1][0] != len(tail):
+        return None, None
+
+    countries = {country for _, country in matches}
+    if len(countries) > 1:
+        return None, "country_text_ambiguous"
+
+    return next(iter(countries)), "country_name_in_text"
 
 def resolveFromWords(text: str, cityMap: dict[str, str]) -> str | None:
     """
@@ -506,9 +576,17 @@ def resolveFromWords(text: str, cityMap: dict[str, str]) -> str | None:
 
     #check back to front (Geo-Names mostly in the last place)
     for word in reversed(words):
-        result = matchAbbreviation(word) or resolveCity(word, cityMap)
-        if result:
-            return result
+        key = word.casefold()
+        if key in _WORD_CONTEXT_REQUIRED:
+            return None
+        country = matchAbbreviation(word)
+        if country:
+            return country
+        if key in _SUBDIVISION_NAMES:
+            return None
+        city = resolveCity(word, cityMap)
+        if city:
+            return city
     return None
 
 # ── Trust Ranking ──────────────────────────────────────────────────────────────
@@ -523,12 +601,14 @@ Trust_RANKING = {
 
     #partial matches
     "dictionary_word":                  0.85,   #found word in dict but String contains more text
+    "country_name_in_text":             0.85,
     "geonames_word":                    0.80,   #City found in Text(i.E. "Univesitätsklinik Leipzig")
     "pycountry_subdivision_exact":      0.75,
     "ror_fuzzy":                        0.70,   #ROR found in fuzzy search
 
     #fallback
     "geonames_review":                  0.0,
+    "country_text_ambiguous":           0.0,
     "pycountry_ambiguous":              0.0,
     "not_found":                        0.0,
 }
@@ -553,10 +633,16 @@ def resolve(text: str) -> tuple[str | None, str | None, float]:
     if source:
         return country, source, Trust_RANKING[source]
     city = resolveCity(text, _CITY_MAP)
+
     if city:
         return city, "geonames_unique_primary", Trust_RANKING["geonames_unique_primary"]
     if text.strip().casefold() in _CITY_REVIEW:
         return None, "geonames_review", Trust_RANKING["geonames_review"]
+
+    country, source = match_country_in_text(text)
+    if source:
+        return country, source, Trust_RANKING[source]
+
     word = resolveFromWords(text, _CITY_MAP)
     if word:
         return word, "geonames_word", Trust_RANKING["geonames_word"]
@@ -571,6 +657,56 @@ def resolve(text: str) -> tuple[str | None, str | None, float]:
 #    ]
 #    for t in tests:
 #        print(f"{t:15} → {resolve(t)}")
+
+def extract_geo_candidate(single: str) -> str:
+    clean = removeNoise(single)
+    if not clean:
+        return ""
+
+    field = extractGeoField(clean)
+    author_tail = re.search(r"\(([^()]*,[^()]*)\)\.?\s*$", single)
+    if author_tail is None:
+        return field
+
+    last_in_brackets = author_tail.group(1).rsplit(",", 1)[-1].strip()
+    if field.casefold() != last_in_brackets.casefold():
+        return field
+
+    # Eine ausdrückliche Länderangabe in Klammern bleibt erhalten.
+    if matchAbbreviation(last_in_brackets) or _COUNTRY_NAMES.get(last_in_brackets.casefold()):
+        return field
+
+    prefix = single[:author_tail.start()].rstrip()
+    clean_prefix = removeNoise(prefix)
+    return extractGeoField(clean_prefix) if clean_prefix else ""
+
+def unwrap_parenthesized_country(single: str, field: str) -> str:
+    if not field.startswith("("):
+        return field
+
+    name = field[1:].rstrip(")").strip()
+    country, source, _ = resolve(name)
+    if country is None or source not in ("dictionary_exact", "pycountry_exact"):
+        return field
+
+    matches = list(re.finditer(
+        r"\(\s*" + re.escape(name) + r"\s*\)", single, re.I
+    ))
+    if not matches:
+        return field
+
+    prefix = single[:matches[-1].start()]
+    preceding = prefix.rstrip(" .,;").rsplit(",", 1)[-1].strip()
+    previous_country, _, _ = resolve(preceding)
+
+    if previous_country is not None and previous_country != country:
+        return field
+
+    if not prefix.strip() or prefix.rstrip().endswith(",") or previous_country == country:
+        return name
+
+    return field
+
 def run_geo_pipeline(batch_size: int = 10000) -> None:
 
     if batch_size < 1:
@@ -609,11 +745,9 @@ def run_geo_pipeline(batch_size: int = 10000) -> None:
             article_count += 1
 
             for single in splitAffiliations(affiliations):
-                clean = removeNoise(single)
-                if not clean:
-                    continue
-
-                field = extractGeoField(clean)
+                field = unwrap_parenthesized_country(
+                    single, extract_geo_candidate(single)
+                )
                 field = re.sub(r"^\d{4,6}\s+", "", field).strip()
 
                 if field and len(field) >= 3:
@@ -656,18 +790,21 @@ def run_geo_pipeline(batch_size: int = 10000) -> None:
             for i, (candidate, count) in enumerate(candidate_counter.items(), start=1):
                 country, source, trust_ranking = resolve(candidate)
                 previous_ror = old_ror_table.get(candidate)
-                if previous_ror is not None and previous_ror[1] > trust_ranking:
+                if (previous_ror is not None
+                and source not in ("pycountry_ambiguous", "country_text_ambiguous")
+                and previous_ror[1] > trust_ranking
+                ):
                     country, trust_ranking = previous_ror
                     source = "ror_exact"
 
                 if source == "ror_exact":
                     reason = "ror_verified"
-                elif source == "pycountry_ambiguous":
-                    reason = "ambiguous"
                 elif source == "pycountry_subdivision_exact":
                     reason = "subdivision_review"
                 elif source == "geonames_review":
                     reason = "geonames_review"
+                elif source in ("pycountry_ambiguous", "country_text_ambiguous"):
+                    reason = "ambiguous"
                 elif country is None:
                     reason = "not_found"
                 elif trust_ranking < 0.90:

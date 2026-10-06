@@ -6,7 +6,7 @@ Stufe 3: Städtenamen auf Ländercode mappen via GeoNames cities15000.txt
 """
 
 GEONAMES_PATH = Path(__file__).resolve().with_name("cities15000.txt")
-CONTEXT_REQUIRED_NAMES = {"alta", "roth", "johnston", "bello", "lanka", "republic"}
+CONTEXT_REQUIRED_NAMES = {"alta", "roth", "johnston", "bello", "lanka", "republic", "los alamos", "asia", "university", "universidad", "normal", "federal", "union", "oral"}
 
 
 def loadGeoNames() -> tuple[dict[str, str], set[str]]:
