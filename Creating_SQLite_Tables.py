@@ -206,6 +206,9 @@ def load_reference_tables():
         INSERT INTO organisations_and_industry(name, abkuerzung, rechtsform, kategorie, typ)
         VALUES
         ('Pfizer', NULL, 'Inc.', 'Pharma & Biotech', 'Industrie'),
+        ('Genentech', NULL, NULL, 'Pharma & Biotech', 'Industrie'),
+        ('Biogen', NULL, NULL, 'Pharma & Biotech', 'Industrie'),
+        ('Zelluna', NULL, 'ASA', 'Pharma & Biotech', 'Industrie'),
         ('Novartis', NULL, 'AG', 'Pharma & Biotech', 'Industrie'),
         ('F. Hoffmann-La Roche', 'Roche', 'AG', 'Pharma & Biotech', 'Industrie'),
         ('AstraZeneca', NULL, 'plc', 'Pharma & Biotech', 'Industrie'),
@@ -264,7 +267,9 @@ def load_reference_tables():
         ('Paul-Ehrlich-Institut', 'PEI', NULL, 'Bundesbehörde - Gesundheit', 'Behörde'),
         ('Bundesinstitut für Prävention und Aufklärung in der Medizin', 'BIPAM', NULL, 'Bundesbehörde - Gesundheit', 'Behörde'),
         ('Bundeszentrale für gesundheitliche Aufklärung', 'BZgA', NULL, 'Bundesbehörde - Gesundheit', 'Behörde'),
-        ('Institut für Qualität und Wirtschaftlichkeit im Gesundheitswesen', 'IQWiG', NULL, 'Bundesbehörde - Gesundheit', 'Behörde'),
+        ('Institut für Qualität und Wirtschaftlichkeit im Gesundheitswesen', 'IQWiG', NULL, 'Wissenschaftliches Institut', 'Forschung'),
+        ('Fermi National Accelerator Laboratory', NULL, NULL, 'Nationales Forschungslabor', 'Forschung'),
+        ('Karlsruhe Institute of Technology', NULL, NULL, 'Universität', 'Forschung'),
         ('Bundesinstitut für Risikobewertung', 'BfR', NULL, 'Bundesbehörde - Umwelt & Arbeit', 'Behörde'),
         ('Bundesanstalt für Arbeitsschutz und Arbeitsmedizin', 'BAuA', NULL, 'Bundesbehörde - Umwelt & Arbeit', 'Behörde'),
         ('Umweltbundesamt', 'UBA', NULL, 'Bundesbehörde - Umwelt & Arbeit', 'Behörde'),
