@@ -95,7 +95,7 @@ def removeNoise(text: str) -> str:
     # things that are no Country name, event if they're in the last spot
 _NON_GEO = re.compile(
     r"^\s*("
-    r"[Dd]ept(?:artment)?\.?\s*(?:of\s+)?.*|"   # Dept. / Department of …
+     r"[Dd]ep(?:artment|t)\.?\s*(?:of\s+)?.*|"  # Dept. / Department of …
     r"[Dd]ivision\s*(?:of\s+)?.*|"
     r"[Ll]aborator(?:y|ies).*|"
     r"[Ff]acult(?:y|ies)\s*(?:of\s+)?.*|"
