@@ -99,6 +99,7 @@ def resolve_not_found():
         time.sleep(0.2)
     con.close()
     print(f"\ndone - {found} / {len(not_found)} Affiliations resolved via ROR")
+
 if __name__ == "__main__":
     resolve_not_found()
 

@@ -470,6 +470,12 @@ _SUBDIVISION_NAMES = {}
 for subdivision in pycountry.subdivisions:
     _SUBDIVISION_NAMES.setdefault(subdivision.name.strip().casefold(), set()).add(subdivision.country_code)
 
+_US_STATE_NAMES = {
+    subdivision.name.strip().casefold()
+    for subdivision in pycountry.subdivisions
+    if subdivision.country_code == "US" and subdivision.type in ("State", "District")
+}
+
 def matchIso3(text: str) -> str | None:
     code = text.strip()
     if re.fullmatch(r"[A-Z]{3}", code) is None:
@@ -564,6 +570,37 @@ def match_country_in_text(text: str) -> tuple[str | None, str | None]:
 
     return next(iter(countries)), "country_name_in_text"
 
+_US_STATE_ZIP_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(subdivision.code.rsplit("-", 1)[-1]
+    for subdivision in pycountry.subdivisions
+    if subdivision.country_code == "US"
+    and subdivision.type in ("State", "District")
+    )) + r")\s+\d{5}(?:-\d{4})?\b"
+)
+
+def raw_country_hints(raw: str, candidate: str | None = None) -> set[str]:
+    hints = set()
+    if not raw:
+        return hints
+    country, source = match_country_in_text(raw)
+    if source == "country_name_in_text":
+        hints.add(country)
+    if _US_STATE_ZIP_RE.search(raw):
+        hints.add("US")
+
+    #Only ROR: respect countries with other sections
+    if candidate:
+        without_emails = re.sub(r"\S+@\S+", "", raw)
+        for part in re.split(r"[,;]", without_emails):
+            if candidate.casefold() in part.casefold():
+                continue
+            country, source = match_country_in_text(part)
+            if source == "country_name_in_text":
+                hints.add(country)
+    return hints
+
+
+
 def resolveFromWords(text: str, cityMap: dict[str, str]) -> str | None:
     """
     Fallback: scans every single word (back to front) in a text
@@ -596,6 +633,7 @@ Trust_RANKING = {
     "pycountry_exact":                  0.95,     #standard-ISO-Names
     "pycountry_iso3_exact":             0.95,
     "geonames_unique_primary":          0.90,
+    "us_state_exact":                   0.90,
     "ror_exact":                        0.85,     #Exact ROR-Name/ID Match
     "geonames_exact":                   0.85,     #whole String is known City(i.E.Leipzig)
 
@@ -722,19 +760,40 @@ def run_geo_pipeline(batch_size: int = 10000) -> None:
 
     try:
         #loading current ROR before replacing current table
-        old_ror_table = {
-            candidate: (country, trust)
-            for candidate, country, trust in con.execute("""
-                SELECT affiliation_candidate, country, trust_ranking
+        old_ror_table = {}
+        skipped_old_ror = 0
+
+        for candidate, country, trust, raw in con.execute(
+            """
+                SELECT affiliation_candidate, country, trust_ranking, affiliation_raw
                 FROM laender_quarantaene
                 WHERE reason = 'ror_verified'
-                    AND country IS NOT NULL
-                    AND country != 'not found'
-            """)
-        }
+                AND country IS NOT NULL
+                AND country != 'not found'
+            """):
+            if not raw:
+                skipped_old_ror += 1
+                continue
+
+            current_field = unwrap_parenthesized_country(
+                raw, extract_geo_candidate(raw)
+            )
+            current_field = re.sub(r"^\d{4,6}\s+", "", current_field).strip()
+            _, raw_source = match_country_in_text(raw)
+            if (
+                    current_field != candidate
+                    or raw_source == "country_text_ambiguous"
+                    or bool(raw_country_hints(raw, candidate)-{country})
+            ):
+                skipped_old_ror += 1
+                continue
+
+            old_ror_table[candidate] = (country, trust)
 
         candidate_counter = Counter()
         candidate_pmids = {}
+        ror_context_conflicts = set()
+        geo_context_conflicts = set()
         article_count = 0
 
         for pmid, affiliations in con.execute("""
@@ -752,6 +811,20 @@ def run_geo_pipeline(batch_size: int = 10000) -> None:
 
                 if field and len(field) >= 3:
                     candidate_counter[field] += 1
+                    city_country = _CITY_MAP.get(field.casefold())
+                    if (
+                        city_country is not None
+                        and field not in geo_context_conflicts
+                        and raw_country_hints(single) - {city_country}
+                    ):
+                        geo_context_conflicts.add(field)
+                    if field in old_ror_table and field not in ror_context_conflicts:
+                        _, raw_source = match_country_in_text(single)
+                        if(raw_source == "country_text_ambiguous"
+                            or raw_country_hints(single, field) - {old_ror_table[field][0]}
+                        ):
+                            ror_context_conflicts.add(field)
+
                     if field not in candidate_pmids:
                         candidate_pmids[field] = (pmid, single)
 
@@ -763,7 +836,12 @@ def run_geo_pipeline(batch_size: int = 10000) -> None:
         print(f"{article_count:,} artikel gelesen")
         print(f"{candidate_count:,}verschiedene Kandidaten "
               f"{occurence_count:,} mal in gefunden")
-        print(f"{len(old_ror_table):,} bisherige ROR-Ergebnisse gelesen")
+
+        print(f"{len(old_ror_table):,} ROR-Vorschläge nach Erstprüfung übrig; "
+              f"{skipped_old_ror:,} verworfen")
+        print(f"{len(ror_context_conflicts):,} ROR-Kandidaten mit widersprüchlichen "
+              f"Roh-Affiliationen")
+        print(f"{len(geo_context_conflicts):,} GeoNames-Kandidaten mit widersprüchlichem Länderkontext")
 
         geo_insert_sql = """
             INSERT INTO geo_zuordnung
@@ -789,7 +867,20 @@ def run_geo_pipeline(batch_size: int = 10000) -> None:
 
             for i, (candidate, count) in enumerate(candidate_counter.items(), start=1):
                 country, source, trust_ranking = resolve(candidate)
-                previous_ror = old_ror_table.get(candidate)
+                if source == "geonames_unique_primary" and candidate in geo_context_conflicts:
+                    country, source, trust_ranking = None, "geonames_review", 0.0
+
+                previous_ror =(
+                    None
+                    if candidate in ror_context_conflicts
+                    or candidate in geo_context_conflicts
+                    else old_ror_table.get(candidate)
+                )
+
+                if(source == "pycountry_subdivision_exact" and country == "US" and candidate.strip().casefold() in _US_STATE_NAMES):
+                    source = "us_state_exact"
+                    trust_ranking = Trust_RANKING[source]
+
                 if (previous_ror is not None
                 and source not in ("pycountry_ambiguous", "country_text_ambiguous")
                 and previous_ror[1] > trust_ranking
