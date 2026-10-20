@@ -180,7 +180,7 @@ def classify_stufe_1(db_path=DB_PATH, batchsize=10000):
                 SELECT id, affiliation_raw, affiliation_normalized
                 FROM autor_klassifikation
                 WHERE id > ?
-                  AND trust_ranking = 0
+                  AND (trust_ranking = 0 OR (trust_ranking = 3 AND instr(affiliation_raw, ', & ') > 0))
                   AND affiliation_normalized != ''
                 ORDER BY id
                 LIMIT ?
@@ -235,6 +235,29 @@ def classify_stufe_1(db_path=DB_PATH, batchsize=10000):
                         )
                     treffer_text = f"{name} (typ={typ}, sub={sub})"
 
+                    teile = re.split(r"\.\s*&\s+|,\s*&\s+(?=[A-ZÄÖÜ])|;\s+(?=[A-ZÄÖÜ])", aff_raw or "")
+                    teilkonflikt = False
+                    if len(teile) > 1:
+                        for teil in teile:
+                            teil_norm = normalize_affiliation(KONTAKT_ADRESSEN.sub(" ", teil))
+                            teil_typen = set()
+                            for teil_end, (teil_name, teil_typ, _, _) in automaton.iter(teil_norm):
+                                teil_start = teil_end - len(teil_name) + 1
+                                davor = teil_norm[teil_start - 1] if teil_start > 0 else ""
+                                danach = teil_norm[teil_end + 1] if teil_end + 1 < len(teil_norm) else ""
+                                if (davor and (davor.isalnum() or davor == "_")) or (
+                                    danach and (danach.isalnum() or danach == "_")
+                                ):
+                                    continue
+                                if teil_typ == "Industrie" and teil_name == "novo nordisk" and re.match(
+                                    r"\s+foundation\b", teil_norm[teil_end + 1:]
+                                ):
+                                    continue
+                                teil_typen.add(teil_typ)
+                            if teil_typen != {typ}:
+                                teilkonflikt = True
+                                break
+
                     kontext_hinweise = []
                     if typ == "Industrie":
                         for muster, hinweis in (
@@ -244,7 +267,7 @@ def classify_stufe_1(db_path=DB_PATH, batchsize=10000):
                         ):
                             if re.search(muster, aff, re.IGNORECASE):
                                 kontext_hinweise.append(hinweis)
-                    if len(gefundene_typen) > 1 or rechtsform_treffer or kontext_hinweise:
+                    if len(gefundene_typen) > 1 or rechtsform_treffer or kontext_hinweise or teilkonflikt:
                         kategorie = None
                         ranking = 1
                         pruefung = True
@@ -254,6 +277,8 @@ def classify_stufe_1(db_path=DB_PATH, batchsize=10000):
                             treffer_text += f"; zusätzliche Rechtsform: {rechtsform_treffer}"
                         if kontext_hinweise:
                             treffer_text += "; weiterer Kontext: " + ", ".join(kontext_hinweise)
+                        if teilkonflikt :
+                            treffer_text +="; mehrere Affiliationsangaben nicht einheitlich belegt"
                     elif quelle == "ref_hospitals" and not any(begriff in name for begriff in HOSPITAL_KLARE_BEGRIFFE):
                         kategorie = None
                         ranking = 2
